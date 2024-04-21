@@ -1,107 +1,149 @@
-const express = require("express");
-const nodemailer = require("nodemailer");
-const bodyParser = require("body-parser");
-const mysql = require('mysql');
+/*!
+ * vary
+ * Copyright(c) 2014-2017 Douglas Christopher Wilson
+ * MIT Licensed
+ */
 
-const app = express();
-const port = 5500;
+'use strict'
 
-app.use(bodyParser.json());
+/**
+ * Module exports.
+ */
 
-const senderEmail = "parth.burange22@gmail.com";
-const senderPassword = "swoilqobbxdafhtw";
-const fixedRecipientEmail = "202201202@vupune.ac.in"; 
+module.exports = vary
+module.exports.append = append
 
-const db = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'password',
-    port: '3306'
-});
+/**
+ * RegExp to match field-name in RFC 7230 sec 3.2
+ *
+ * field-name    = token
+ * token         = 1*tchar
+ * tchar         = "!" / "#" / "$" / "%" / "&" / "'" / "*"
+ *               / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+ *               / DIGIT / ALPHA
+ *               ; any VCHAR, except delimiters
+ */
 
-db.connect((err) => {
-    if (err) {
-        console.error('Error connecting to database:', err);
-        return;
+var FIELD_NAME_REGEXP = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+/**
+ * Append a field to a vary header.
+ *
+ * @param {String} header
+ * @param {String|Array} field
+ * @return {String}
+ * @public
+ */
+
+function append (header, field) {
+  if (typeof header !== 'string') {
+    throw new TypeError('header argument is required')
+  }
+
+  if (!field) {
+    throw new TypeError('field argument is required')
+  }
+
+  // get fields array
+  var fields = !Array.isArray(field)
+    ? parse(String(field))
+    : field
+
+  // assert on invalid field names
+  for (var j = 0; j < fields.length; j++) {
+    if (!FIELD_NAME_REGEXP.test(fields[j])) {
+      throw new TypeError('field argument contains an invalid header name')
     }
-    console.log('Connected to MySQL database');
-});
+  }
 
-const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-        user: senderEmail,
-        pass: senderPassword,
-    },
-});
+  // existing, unspecified vary
+  if (header === '*') {
+    return header
+  }
 
-app.get("/", (req, res) => {
-    res.sendFile(__dirname + "/index.html");
-});
+  // enumerate current values
+  var val = header
+  var vals = parse(header.toLowerCase())
 
-app.post("/send-email", (req, res) => {
-    const recipientEmail = req.body?.recipientEmail ? req.body.recipientEmail : fixedRecipientEmail;
-    console.log(req.body)
-    const sixDigitRandomNumber = Math.floor(100000 + Math.random() * 900000);
-    console.log(`SELECT email, passwords FROM message.otps WHERE email = ${recipientEmail}`)
+  // unspecified vary
+  if (fields.indexOf('*') !== -1 || vals.indexOf('*') !== -1) {
+    return '*'
+  }
 
-    // Check if the recipient email exists in the database
-    db.query(`SELECT email, passwords FROM message.otps WHERE email = ${recipientEmail}`, (err, results) => {
-        console.log(err,results)
-        if (err) {
-            console.error("Error:", err);
-            res.status(500).json({ success: false, message: "Error retrieving data from the database." });
-            return;
+  for (var i = 0; i < fields.length; i++) {
+    var fld = fields[i].toLowerCase()
+
+    // append value (case-preserving)
+    if (vals.indexOf(fld) === -1) {
+      vals.push(fld)
+      val = val
+        ? val + ', ' + fields[i]
+        : fields[i]
+    }
+  }
+
+  return val
+}
+
+/**
+ * Parse a vary header into an array.
+ *
+ * @param {String} header
+ * @return {Array}
+ * @private
+ */
+
+function parse (header) {
+  var end = 0
+  var list = []
+  var start = 0
+
+  // gather tokens
+  for (var i = 0, len = header.length; i < len; i++) {
+    switch (header.charCodeAt(i)) {
+      case 0x20: /*   */
+        if (start === end) {
+          start = end = i + 1
         }
+        break
+      case 0x2c: /* , */
+        list.push(header.substring(start, end))
+        start = end = i + 1
+        break
+      default:
+        end = i + 1
+        break
+    }
+  }
 
-        if (results.length === 0) {
-            // Email not found in the database
-            res.status(404).json({ success: false, message: "Email not found." });
-            return;
-        }
+  // final token
+  list.push(header.substring(start, end))
 
-        const storedPassword = results[0].passwords;
+  return list
+}
 
-        // Validate password
-        if (req.body.password !== storedPassword) {
-            res.status(401).json({ success: false, message: "Invalid password." });
-            return;
-        }
+/**
+ * Mark that a request is varied on a header field.
+ *
+ * @param {Object} res
+ * @param {String|Array} field
+ * @public
+ */
 
-        const mailOptions = {
-            from: senderEmail,
-            to: recipientEmail,
-            subject: "Your One-Time Password (OTP) for Login",
-            text: `Hello,\n\nThank you for using the Nobel Hospital Login Portal. Your one-time password (OTP) is ${sixDigitRandomNumber}. Please use this OTP to complete the login process. Do not share this OTP with anyone for security reasons. If you did not attempt to log in, your email is being used without your knowledge; contact the admin as soon as possible.`,
-        };
+function vary (res, field) {
+  if (!res || !res.getHeader || !res.setHeader) {
+    // quack quack
+    throw new TypeError('res argument is required')
+  }
 
-        // Store OTP in the database
-        db.query('INSERT INTO message.otps (email, otp, passwords) VALUES (?, ?, ?)', [recipientEmail, sixDigitRandomNumber, storedPassword], (insertErr, insertResult) => {
-        db.commit
-        
-            if (insertErr) {
-                console.error("Error:", insertErr);
-                res.status(500).json({ success: false, message: "Error storing OTP in the database." });
-                return;
-            }
-            console.log('OTP sent and stored in the database');
+  // get existing header
+  var val = res.getHeader('Vary') || ''
+  var header = Array.isArray(val)
+    ? val.join(', ')
+    : String(val)
 
-            // Send email
-            transporter.sendMail(mailOptions, (error, info) => {
-                if (error) {
-                    console.error("Error:", error);
-                    res.status(500).json({ success: false, message: "Error sending email." });
-                } else {
-                    console.log("Email sent:", info.response);
-                    res.status(200).json({ success: true, message: "Email sent successfully." });
-                }
-            });
-        });
-    });
-});
-
-app.use(express.static(__dirname));
-
-app.listen(port, () => {
-    console.log(`Server is running at http://localhost:${port}`);
-});
+  // set new header
+  if ((val = append(header, field))) {
+    res.setHeader('Vary', val)
+  }
+}
